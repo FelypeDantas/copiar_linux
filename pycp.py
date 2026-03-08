@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 
-import sys
-import time
 import argparse
 import hashlib
+import time
+import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 BUF_SIZE = 1024 * 1024
 
+
+# -------------------------
+# UTIL
+# -------------------------
 
 def format_size(size):
     for unit in ["B","KB","MB","GB","TB"]:
@@ -20,18 +24,24 @@ def format_size(size):
 
 def sha256sum(path):
     h = hashlib.sha256()
+
     with open(path,"rb") as f:
         while True:
             data = f.read(BUF_SIZE)
             if not data:
                 break
             h.update(data)
+
     return h.hexdigest()
 
 
+# -------------------------
+# PROGRESS BAR
+# -------------------------
+
 def progress_bar(done,total,start):
 
-    percent = done/total
+    percent = done/total if total else 0
     width = 30
     filled = int(percent*width)
 
@@ -47,19 +57,24 @@ def progress_bar(done,total,start):
         f"{format_size(speed)}/s "
         f"ETA {eta:5.1f}s"
     )
+
     sys.stdout.flush()
 
 
-def copy_file(src,dst,resume=False,progress=False):
+# -------------------------
+# COPY FILE
+# -------------------------
+
+def copy_file(src,dst,progress=False,resume=False):
 
     src = Path(src)
     dst = Path(dst)
 
     total = src.stat().st_size
-    start_time = time.time()
+    start = time.time()
 
-    mode = "wb"
     copied = 0
+    mode = "wb"
 
     if resume and dst.exists():
         copied = dst.stat().st_size
@@ -70,7 +85,9 @@ def copy_file(src,dst,resume=False,progress=False):
         fsrc.seek(copied)
 
         while True:
+
             data = fsrc.read(BUF_SIZE)
+
             if not data:
                 break
 
@@ -78,13 +95,69 @@ def copy_file(src,dst,resume=False,progress=False):
             copied += len(data)
 
             if progress:
-                progress_bar(copied,total,start_time)
+                progress_bar(copied,total,start)
 
     if progress:
         print()
 
 
-def copy_directory(src,dst,args):
+# -------------------------
+# DIRECTORY COPY
+# -------------------------
+
+def copy_directory(src,dst,threads,progress):
+
+    src = Path(src)
+    dst = Path(dst)
+
+    tasks = []
+
+    for path in src.rglob("*"):
+
+        if path.is_file():
+
+            rel = path.relative_to(src)
+            target = dst / rel
+
+            target.parent.mkdir(parents=True,exist_ok=True)
+
+            tasks.append((path,target))
+
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+
+        futures = []
+
+        for s,d in tasks:
+            futures.append(
+                ex.submit(copy_file,s,d,progress)
+            )
+
+        for f in futures:
+            f.result()
+
+
+# -------------------------
+# SYNC
+# -------------------------
+
+def needs_update(src,dst):
+
+    if not dst.exists():
+        return True
+
+    s = src.stat()
+    d = dst.stat()
+
+    if s.st_size != d.st_size:
+        return True
+
+    if int(s.st_mtime) != int(d.st_mtime):
+        return True
+
+    return False
+
+
+def sync_directories(src,dst,threads,progress):
 
     src = Path(src)
     dst = Path(dst)
@@ -100,22 +173,30 @@ def copy_directory(src,dst,args):
             rel = path.relative_to(src)
             target = dst / rel
 
-            target.parent.mkdir(parents=True,exist_ok=True)
+            if needs_update(path,target):
 
-            tasks.append((path,target))
+                target.parent.mkdir(parents=True,exist_ok=True)
 
-    with ThreadPoolExecutor(max_workers=args.threads) as ex:
+                tasks.append((path,target))
+
+    print(f"{len(tasks)} arquivos precisam ser sincronizados")
+
+    with ThreadPoolExecutor(max_workers=threads) as ex:
 
         futures=[]
 
         for s,d in tasks:
             futures.append(
-                ex.submit(copy_file,s,d,args.resume,args.progress)
+                ex.submit(copy_file,s,d,progress)
             )
 
         for f in futures:
             f.result()
 
+
+# -------------------------
+# VERIFY
+# -------------------------
 
 def verify(src,dst):
 
@@ -125,47 +206,61 @@ def verify(src,dst):
     h2 = sha256sum(dst)
 
     if h1 == h2:
-        print("✔ Arquivos idênticos")
+        print("✔ arquivos idênticos")
     else:
-        print("✖ Arquivos diferentes")
+        print("✖ arquivos diferentes")
 
+
+# -------------------------
+# CLI
+# -------------------------
 
 def main():
 
-    parser = argparse.ArgumentParser(description="pycp advanced copy tool")
+    parser = argparse.ArgumentParser(
+        description="pycp_pro - advanced cross-platform copy tool"
+    )
 
-    parser.add_argument("source")
-    parser.add_argument("dest")
+    sub = parser.add_subparsers(dest="command")
 
+    copy_cmd = sub.add_parser("copy")
+    copy_cmd.add_argument("source")
+    copy_cmd.add_argument("dest")
+
+    sync_cmd = sub.add_parser("sync")
+    sync_cmd.add_argument("source")
+    sync_cmd.add_argument("dest")
+
+    parser.add_argument("-t","--threads",type=int,default=4)
     parser.add_argument("-p","--progress",action="store_true")
-    parser.add_argument("-r","--recursive",action="store_true")
-    parser.add_argument("-t","--threads",type=int,default=1)
-    parser.add_argument("--resume",action="store_true")
     parser.add_argument("--hash",action="store_true")
 
     args = parser.parse_args()
 
-    src = Path(args.source)
-    dst = Path(args.dest)
+    if args.command == "copy":
 
-    if not src.exists():
-        print("Arquivo origem não existe")
-        sys.exit(1)
+        src = Path(args.source)
+        dst = Path(args.dest)
 
-    if src.is_dir():
+        if src.is_dir():
+            copy_directory(src,dst,args.threads,args.progress)
+        else:
+            copy_file(src,dst,args.progress)
 
-        if not args.recursive:
-            print("Use -r para copiar diretórios")
-            sys.exit(1)
+            if args.hash:
+                verify(src,dst)
 
-        copy_directory(src,dst,args)
+    elif args.command == "sync":
+
+        sync_directories(
+            args.source,
+            args.dest,
+            args.threads,
+            args.progress
+        )
 
     else:
-
-        copy_file(src,dst,args.resume,args.progress)
-
-        if args.hash:
-            verify(src,dst)
+        parser.print_help()
 
 
 if __name__ == "__main__":
