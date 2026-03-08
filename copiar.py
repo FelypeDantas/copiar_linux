@@ -1,8 +1,10 @@
-import os
+#!/usr/bin/env python3
+
 import sys
 import time
 import argparse
 import hashlib
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 BUF_SIZE = 1024 * 1024
@@ -28,11 +30,12 @@ def sha256sum(path):
 
 
 def progress_bar(done,total,start):
+
     percent = done/total
     width = 30
     filled = int(percent*width)
 
-    bar = "█"*filled + "-"*(width-filled)
+    bar = "#"*filled + "-"*(width-filled)
 
     elapsed = time.time() - start
     speed = done/elapsed if elapsed else 0
@@ -49,14 +52,17 @@ def progress_bar(done,total,start):
 
 def copy_file(src,dst,resume=False,progress=False):
 
-    total = os.path.getsize(src)
+    src = Path(src)
+    dst = Path(dst)
+
+    total = src.stat().st_size
     start_time = time.time()
 
     mode = "wb"
     copied = 0
 
-    if resume and os.path.exists(dst):
-        copied = os.path.getsize(dst)
+    if resume and dst.exists():
+        copied = dst.stat().st_size
         mode = "ab"
 
     with open(src,"rb") as fsrc, open(dst,mode) as fdst:
@@ -80,27 +86,27 @@ def copy_file(src,dst,resume=False,progress=False):
 
 def copy_directory(src,dst,args):
 
-    if not os.path.exists(dst):
-        os.makedirs(dst)
+    src = Path(src)
+    dst = Path(dst)
+
+    dst.mkdir(parents=True,exist_ok=True)
 
     tasks=[]
 
-    for root,dirs,files in os.walk(src):
+    for path in src.rglob("*"):
 
-        rel = os.path.relpath(root,src)
-        target_root = os.path.join(dst,rel)
+        if path.is_file():
 
-        os.makedirs(target_root,exist_ok=True)
+            rel = path.relative_to(src)
+            target = dst / rel
 
-        for f in files:
+            target.parent.mkdir(parents=True,exist_ok=True)
 
-            s = os.path.join(root,f)
-            d = os.path.join(target_root,f)
-
-            tasks.append((s,d))
+            tasks.append((path,target))
 
     with ThreadPoolExecutor(max_workers=args.threads) as ex:
-        futures = []
+
+        futures=[]
 
         for s,d in tasks:
             futures.append(
@@ -112,6 +118,7 @@ def copy_directory(src,dst,args):
 
 
 def verify(src,dst):
+
     print("Verificando integridade...")
 
     h1 = sha256sum(src)
@@ -138,14 +145,14 @@ def main():
 
     args = parser.parse_args()
 
-    src=args.source
-    dst=args.dest
+    src = Path(args.source)
+    dst = Path(args.dest)
 
-    if not os.path.exists(src):
+    if not src.exists():
         print("Arquivo origem não existe")
         sys.exit(1)
 
-    if os.path.isdir(src):
+    if src.is_dir():
 
         if not args.recursive:
             print("Use -r para copiar diretórios")
